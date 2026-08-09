@@ -1,0 +1,4 @@
+name: cursor
+kind: model-provider
+version: 0.1.0
+description: Standalone Cursor CLI provider through an authenticated loopback bridge
