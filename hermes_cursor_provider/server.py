@@ -13,7 +13,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlsplit
 
+from . import __version__
 from .installer import _validate_token
+from .protocol import CursorProtocolError, validate_chat_request
+from .runner import (
+    CursorAuthenticationError,
+    CursorCancelledError,
+    CursorModelUnavailableError,
+    CursorOutputLimitError,
+    CursorTimeoutError,
+    CursorUnavailableError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -154,13 +164,53 @@ class BridgeApplication:
         route = urlsplit(path).path.rstrip("/") or "/"
         method = method.upper()
         if method == "GET" and route == "/health":
-            return _json_response({"status": "ok"})
+            try:
+                cursor = self.runner.diagnostics()
+                status = "ok"
+                http_status = 200
+            except Exception as exc:  # noqa: BLE001 - diagnostic boundary
+                logger.warning("Cursor diagnostics failed (%s)", type(exc).__name__)
+                cursor = {
+                    "installed": not isinstance(exc, CursorUnavailableError),
+                    "authenticated": not isinstance(exc, CursorAuthenticationError),
+                    "error": type(exc).__name__,
+                }
+                status = "degraded"
+                http_status = 503
+            return _json_response(
+                {
+                    "status": status,
+                    "bridge_version": __version__,
+                    "mode": getattr(getattr(self.runner, "config", None), "mode", "unknown"),
+                    "cursor": cursor,
+                    "capabilities": {
+                        "chat": True,
+                        "tools": True,
+                        "streaming": False,
+                        "images": False,
+                    },
+                },
+                status=http_status,
+            )
         if method == "GET" and route == "/v1/models":
             acquired_here = not admitted
             if acquired_here and not self.try_acquire_slot():
                 return _error("Cursor bridge is busy", status=429, error_type="rate_limit_error")
             try:
-                models = self.runner.list_models()
+                try:
+                    models = self.runner.list_models()
+                except CursorAuthenticationError:
+                    return _error(
+                        "Cursor is not authenticated",
+                        status=503,
+                        error_type="provider_unavailable",
+                    )
+                except CursorUnavailableError:
+                    return _error(
+                        "Cursor model discovery is unavailable",
+                        status=503,
+                        error_type="provider_unavailable",
+                    )
                 return _json_response(
                     {
                         "object": "list",
@@ -182,15 +232,15 @@ class BridgeApplication:
             return _error("Request body must be valid UTF-8 JSON", status=400, error_type="invalid_request_error")
         if not isinstance(payload, dict):
             return _error("Request body must be a JSON object", status=400, error_type="invalid_request_error")
-        model = payload.get("model")
-        messages = payload.get("messages")
-        tools = payload.get("tools")
-        if not isinstance(model, str) or not model.strip():
-            return _error("model must be a non-empty string", status=400, error_type="invalid_request_error")
-        if not isinstance(messages, list) or not all(isinstance(item, dict) for item in messages):
-            return _error("messages must be an array of objects", status=400, error_type="invalid_request_error")
-        if tools is not None and not isinstance(tools, list):
-            return _error("tools must be an array when provided", status=400, error_type="invalid_request_error")
+        try:
+            model, messages, tools, tool_choice = validate_chat_request(
+                model=payload.get("model"),
+                messages=payload.get("messages"),
+                tools=payload.get("tools"),
+                tool_choice=payload.get("tool_choice"),
+            )
+        except ValueError as exc:
+            return _error(str(exc), status=400, error_type="invalid_request_error")
 
         acquired_here = not admitted
         if acquired_here and not self.try_acquire_slot():
@@ -199,12 +249,26 @@ class BridgeApplication:
             completion_kwargs: dict[str, Any] = {
                 "model": model,
                 "messages": messages,
-                "tools": tools,
-                "tool_choice": payload.get("tool_choice"),
+                "tools": tools or None,
+                "tool_choice": tool_choice,
             }
             if cancel_event is not None:
                 completion_kwargs["cancel_event"] = cancel_event
             completion = self.runner.complete(**completion_kwargs)
+        except CursorModelUnavailableError:
+            return _error("Requested Cursor model is unavailable", status=404, error_type="model_not_found")
+        except CursorAuthenticationError:
+            return _error("Cursor is not authenticated", status=503, error_type="provider_unavailable")
+        except CursorTimeoutError:
+            return _error("Cursor completion timed out", status=504, error_type="timeout_error")
+        except CursorOutputLimitError:
+            return _error("Cursor completion exceeded its output limit", status=502, error_type="cursor_error")
+        except CursorCancelledError:
+            return _error("Cursor completion was cancelled", status=408, error_type="cancelled")
+        except CursorUnavailableError:
+            return _error("Cursor is unavailable", status=503, error_type="provider_unavailable")
+        except CursorProtocolError:
+            return _error("Cursor returned an invalid protocol response", status=502, error_type="cursor_protocol_error")
         except Exception as exc:  # noqa: BLE001 - HTTP boundary normalizes runner failures
             logger.warning("Cursor completion failed (%s)", type(exc).__name__)
             return _error("Cursor completion failed", status=502, error_type="cursor_error")
@@ -218,7 +282,7 @@ class BridgeApplication:
 
 
 class _BridgeHandler(BaseHTTPRequestHandler):
-    server_version = "HermesCursorProvider/0.1"
+    server_version = f"HermesCursorProvider/{__version__}"
 
     @property
     def app(self) -> BridgeApplication:
@@ -244,6 +308,26 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                 return
 
         try:
+            transfer_encodings = self.headers.get_all("Transfer-Encoding", failobj=[])
+            content_lengths = self.headers.get_all("Content-Length", failobj=[])
+            if transfer_encodings:
+                self._send(
+                    _error(
+                        "Transfer-Encoding is not supported",
+                        status=400,
+                        error_type="invalid_request_error",
+                    )
+                )
+                return
+            if len(content_lengths) > 1:
+                self._send(
+                    _error(
+                        "Multiple Content-Length headers are not allowed",
+                        status=400,
+                        error_type="invalid_request_error",
+                    )
+                )
+                return
             raw_length = self.headers.get("Content-Length", "0")
             try:
                 content_length = int(raw_length)
@@ -311,7 +395,8 @@ class _BridgeHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(response.body)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
-            self.wfile.write(response.body)
+            if self.command.upper() != "HEAD":
+                self.wfile.write(response.body)
         except (BrokenPipeError, ConnectionResetError):
             pass
 
@@ -319,6 +404,21 @@ class _BridgeHandler(BaseHTTPRequestHandler):
         self._dispatch()
 
     def do_POST(self) -> None:
+        self._dispatch()
+
+    def do_HEAD(self) -> None:
+        self._dispatch()
+
+    def do_OPTIONS(self) -> None:
+        self._dispatch()
+
+    def do_PUT(self) -> None:
+        self._dispatch()
+
+    def do_PATCH(self) -> None:
+        self._dispatch()
+
+    def do_DELETE(self) -> None:
         self._dispatch()
 
     def log_message(self, format: str, *args: object) -> None:

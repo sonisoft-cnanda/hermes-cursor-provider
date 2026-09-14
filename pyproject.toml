@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hermes-cursor-provider"
-version = "0.1.0"
-description = "Standalone Cursor CLI model provider for Hermes Agent"
+version = "0.2.0"
+description = "Hermes-controlled inference through Cursor CLI models"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
@@ -18,7 +18,7 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
 ]
-dependencies = []
+dependencies = ["jsonschema>=4.23,<5"]
 
 [project.optional-dependencies]
 test = ["openai>=1", "pytest>=8"]
@@ -27,7 +27,7 @@ test = ["openai>=1", "pytest>=8"]
 hermes-cursor-provider = "hermes_cursor_provider.cli:main"
 
 [project.urls]
-Repository = "https://github.com/mazikooooo/hermes-cursor-provider"
+Repository = "https://github.com/sonisoft-cnanda/hermes-cursor-provider"
 
 [tool.hatch.build.targets.wheel]
 packages = ["hermes_cursor_provider"]

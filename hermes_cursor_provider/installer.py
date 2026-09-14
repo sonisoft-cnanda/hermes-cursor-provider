@@ -13,14 +13,14 @@ from .profile import DEFAULT_BRIDGE_BASE_URL, FALLBACK_MODELS
 
 
 def _render_plugin_init() -> str:
-    return f'''"""Standalone Cursor provider profile for Hermes Agent."""\n\nfrom providers import register_provider\nfrom providers.base import ProviderProfile\n\ncursor = ProviderProfile(\n    name="cursor",\n    aliases=("cursor-agent", "cursor-cli", "cursor-sub", "cursor-subscription"),\n    display_name="Cursor",\n    description="Cursor CLI through a local standalone bridge",\n    signup_url="https://cursor.com/dashboard/integrations",\n    api_mode="chat_completions",\n    env_vars=("CURSOR_BRIDGE_API_KEY",),\n    base_url={DEFAULT_BRIDGE_BASE_URL!r},\n    auth_type="api_key",\n    fallback_models={FALLBACK_MODELS!r},\n    supports_health_check=True,\n)\n\nregister_provider(cursor)\n'''
+    return f'''"""Standalone Cursor provider profile for Hermes Agent."""\n\nfrom providers import register_provider\nfrom providers.base import ProviderProfile\n\ncursor = ProviderProfile(\n    name="cursor",\n    aliases=("cursor-agent", "cursor-cli", "cursor-sub", "cursor-subscription"),\n    display_name="Cursor",\n    description="Hermes-controlled inference through a local Cursor CLI bridge",\n    signup_url="https://cursor.com/dashboard/integrations",\n    api_mode="chat_completions",\n    env_vars=("CURSOR_BRIDGE_API_KEY",),\n    base_url={DEFAULT_BRIDGE_BASE_URL!r},\n    auth_type="api_key",\n    fallback_models={FALLBACK_MODELS!r},\n    supports_health_check=True,\n)\n\nregister_provider(cursor)\n'''
 
 
 PLUGIN_INIT = _render_plugin_init()
 PLUGIN_MANIFEST = """name: cursor
 kind: model-provider
-version: 0.1.0
-description: Standalone Cursor CLI provider through an authenticated loopback bridge
+version: 0.2.0
+description: Hermes-controlled inference through an authenticated Cursor CLI bridge
 """
 _ENV_KEY = "CURSOR_BRIDGE_API_KEY"
 _OWNED_FILES = ("__init__.py", "plugin.yaml")
@@ -125,6 +125,9 @@ def install_plugin(
     env_path = home / ".env"
     _reject_managed_symlinks(home, include_env=True)
     plugin_existed = plugin_dir.exists()
+    env_existed = env_path.exists()
+    env_content = env_path.read_text(encoding="utf-8") if env_existed else ""
+    env_mode = (env_path.stat().st_mode & 0o777) if env_existed else None
     expected = {
         "__init__.py": PLUGIN_INIT,
         "plugin.yaml": PLUGIN_MANIFEST,
@@ -141,9 +144,8 @@ def install_plugin(
             f"Refusing to overwrite existing Cursor plugin files ({joined}); "
             "inspect them first or rerun install with force=True"
         )
-    if env_path.exists():
-        _existing_token(env_path.read_text(encoding="utf-8"))
-    effective_token = _upsert_token(env_path, requested_token)
+    existing_token = _existing_token(env_content) if env_existed else None
+    effective_token = existing_token or requested_token
     backup_dir: Path | None = None
     if conflicts and force:
         plugin_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -157,12 +159,25 @@ def install_plugin(
         _reject_managed_symlinks(home, include_env=True)
         _atomic_write(plugin_dir / "__init__.py", PLUGIN_INIT, mode=0o644)
         _atomic_write(plugin_dir / "plugin.yaml", PLUGIN_MANIFEST, mode=0o644)
+        effective_token = _upsert_token(env_path, requested_token)
     except Exception:
         if backup_dir is not None:
             shutil.rmtree(plugin_dir, ignore_errors=True)
             os.replace(backup_dir, plugin_dir)
         elif not plugin_existed:
             shutil.rmtree(plugin_dir, ignore_errors=True)
+        if env_existed:
+            try:
+                _atomic_write(env_path, env_content, mode=env_mode)
+            except OSError as rollback_error:
+                raise RuntimeError(
+                    "Plugin installation failed and the Hermes .env rollback also failed"
+                ) from rollback_error
+        else:
+            try:
+                env_path.unlink()
+            except FileNotFoundError:
+                pass
         raise
     return InstallResult(
         plugin_dir=plugin_dir,

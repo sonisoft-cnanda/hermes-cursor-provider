@@ -7,6 +7,10 @@ from typing import Any
 DEFAULT_BRIDGE_BASE_URL = "http://127.0.0.1:8765/v1"
 FALLBACK_MODELS = (
     "auto",
+    "cursor-grok-4.6-high",
+    "cursor-grok-4.6-high-fast",
+    "cursor-grok-4.6-medium",
+    "cursor-grok-4.6-xhigh",
     "composer-2.5",
     "composer-2.5-fast",
     "composer-2",
@@ -23,7 +27,7 @@ def register_cursor_provider() -> Any:
         name="cursor",
         aliases=("cursor-agent", "cursor-cli", "cursor-sub", "cursor-subscription"),
         display_name="Cursor",
-        description="Cursor CLI through a local standalone bridge",
+        description="Hermes-controlled inference through a local Cursor CLI bridge",
         signup_url="https://cursor.com/dashboard/integrations",
         api_mode="chat_completions",
         env_vars=("CURSOR_BRIDGE_API_KEY",),

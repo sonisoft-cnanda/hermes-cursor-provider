@@ -1,4 +1,4 @@
 name: cursor
 kind: model-provider
-version: 0.1.0
-description: Standalone Cursor CLI provider through an authenticated loopback bridge
+version: 0.2.0
+description: Hermes-controlled inference through an authenticated Cursor CLI bridge

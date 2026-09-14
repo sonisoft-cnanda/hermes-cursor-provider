@@ -1,21 +1,40 @@
 # Hermes Cursor Provider
 
-Standalone Cursor CLI model-provider plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent).
+Use models available through Cursor CLI as an inference backend for
+[Hermes Agent](https://github.com/NousResearch/hermes-agent), while Hermes
+remains responsible for orchestration, tools, memory, skills, approvals, and
+conversation state.
 
-It keeps Cursor-specific process handling outside Hermes core. Hermes talks to a local OpenAI-compatible bridge; the bridge runs `cursor-agent` and translates Cursor's `stream-json` events back into chat completions and Hermes tool calls.
+It keeps Cursor-specific process handling outside Hermes core. Hermes talks to
+a local OpenAI-compatible bridge; the bridge runs one stateless `cursor-agent`
+request and translates Cursor's `stream-json` events back into chat completions
+and requests for Hermes tools.
 
 This repository is the out-of-tree continuation of [NousResearch/hermes-agent#50215](https://github.com/NousResearch/hermes-agent/pull/50215), following Hermes's third-party provider policy.
 
 ## Architecture
 
 ```text
-Hermes Agent
+Hermes Agent (control plane)
+  -> history, memory, skills, MCP, tools and approvals
   -> OpenAI Chat Completions
   -> http://127.0.0.1:8765/v1
   -> authenticated local bridge
-  -> cursor-agent -p --output-format stream-json
-  -> Cursor subscription / API credentials
+  -> isolated cursor-agent request
+  -> selected Cursor model (inference plane)
 ```
+
+The supported `hermes` mode intentionally does not implement:
+
+```text
+Hermes -> autonomous Cursor Agent -> shell/files/browser/MCP
+```
+
+Cursor CLI print mode is still an agent interface, not a public raw-model API.
+The bridge contains it with Ask mode, Cursor sandboxing, a fresh empty workspace,
+a dedicated Cursor home, explicit instructions, native-tool event rejection,
+and strict output validation. See
+[ADR 0001](docs/decisions/0001-hermes-authority.md) for the exact limitation.
 
 The installed Hermes plugin is declarative and self-contained:
 
@@ -51,10 +70,15 @@ cursor-agent --list-models
 If needed, authenticate with:
 
 ```bash
-cursor-agent login
+HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+mkdir -p "$HERMES_HOME/cursor-home"
+chmod 700 "$HERMES_HOME/cursor-home"
+HOME="$HERMES_HOME/cursor-home" cursor-agent login
 ```
 
-The bridge also supports `CURSOR_API_KEY` as a credential in the selected Hermes `.env`.
+Using a dedicated home prevents normal global Cursor rules and MCP configuration
+from entering the provider context. The bridge also supports `CURSOR_API_KEY`
+as a credential in the selected Hermes `.env`.
 
 ## Install
 
@@ -101,12 +125,14 @@ Default endpoint:
 http://127.0.0.1:8765/v1
 ```
 
-Default Cursor mode is read-only `ask`. The default workspace is an isolated temporary directory, so Cursor does not see the calling repository unless you explicitly provide one.
+Default mode is `hermes`. Every request receives a new temporary workspace, so
+Cursor does not see the calling repository or filesystem state from another
+completion. It maps internally to Cursor Ask mode with `--sandbox enabled` and
+never adds `--force`, resume, or continue.
 
-Current Cursor releases require `--trust` for every non-interactive workspace,
-including read-only `ask`. The bridge therefore acknowledges trust for the
-bridge-created or explicitly selected workspace. This bypasses only Cursor's
-interactive workspace prompt; it does not add `--force` or enable `agent` mode.
+Current Cursor releases require `--trust` for every non-interactive workspace.
+The bridge acknowledges trust only for its bridge-created workspace. This
+bypasses Cursor's interactive workspace prompt; it does not add `--force`.
 
 Explicit writable Cursor-agent mode:
 
@@ -124,7 +150,9 @@ Explicit workspace access:
 hermes-cursor-provider serve --mode agent --workspace /path/to/project
 ```
 
-Giving a workspace to Cursor in `agent` mode allows Cursor's own shell and file tools to modify that workspace. Hermes approval settings do not mediate Cursor's internal tools.
+Giving a workspace to Cursor in `agent`, `ask`, or `plan` mode places that mode
+outside the supported Hermes-authoritative contract. `hermes` mode rejects
+`--workspace`.
 Configured workspaces must already exist and the selected path itself must not
 be a symbolic link. The bridge resolves the path before launching Cursor.
 
@@ -132,16 +160,22 @@ be a symbolic link. The bridge resolves the path before launching Cursor.
 
 ```bash
 hermes config set model.provider cursor
-hermes config set model.default auto
+hermes config set model.default cursor-grok-4.6-high
 hermes config set model.base_url http://127.0.0.1:8765/v1
 ```
 
 Or select `cursor` through `hermes model` after installing the plugin.
 
+Use `/v1/models` or `cursor-agent --list-models` to select an ID available to
+the authenticated account. For example, the tested account exposes
+`cursor-grok-4.6-high`, `cursor-grok-4.6-high-fast`,
+`cursor-grok-4.6-medium`, and `cursor-grok-4.6-xhigh`.
+
 Run a smoke test while the bridge is running:
 
 ```bash
-hermes --oneshot 'Reply exactly CURSOR_OK' --provider cursor --model auto --safe-mode
+hermes --oneshot 'Reply exactly CURSOR_OK' --provider cursor \
+  --model cursor-grok-4.6-high --safe-mode
 ```
 
 Configuration changes apply to new Hermes sessions. A running gateway must be restarted separately by its operator before it sees provider/config changes.
@@ -158,11 +192,13 @@ hermes-cursor-provider uninstall [--hermes-home PATH] [--force]
 Important `serve` options:
 
 ```text
---mode agent|ask|plan
+--mode hermes|agent|ask|plan
 --workspace PATH
+--cursor-home PATH
 --cursor-command COMMAND
 --cursor-arg ARG
 --timeout-seconds SECONDS
+--max-concurrency COUNT
 --port PORT
 ```
 
@@ -184,7 +220,9 @@ All routes require:
 Authorization: Bearer <CURSOR_BRIDGE_API_KEY>
 ```
 
-Both normal responses and OpenAI-compatible SSE responses are supported. SSE is currently emitted after the Cursor subprocess completes rather than forwarding every Cursor event live.
+Both normal responses and OpenAI-compatible SSE responses are supported. SSE is
+currently emitted after the Cursor subprocess completes; `/health` reports
+`streaming: false` so clients are not told this is real incremental streaming.
 
 ## Security model
 
@@ -196,6 +234,8 @@ Both normal responses and OpenAI-compatible SSE responses are supported. SSE is 
 - Strict Cursor subprocess environment allowlist; unrelated Hermes, cloud,
   wallet, SSH and bridge credentials are not inherited
 - Temporary isolated workspace by default
+- Fresh workspace for every `hermes` request and dedicated Cursor home
+- Cursor sandbox enabled and native Cursor tool events rejected in `hermes` mode
 - Authentication and bounded admission occur before POST request bodies are read
 - Bounded request body, handler threads, concurrency, subprocess output and wall timeout
 - Slow HTTP headers and bodies are terminated by a per-connection timeout
@@ -211,6 +251,9 @@ See [SECURITY.md](SECURITY.md) for threat boundaries and reporting.
 - Cursor built-in tool progress is not forwarded live into Hermes UI.
 - Streaming is OpenAI-compatible but synthesized after completion.
 - Image message parts are represented as placeholders; native image forwarding is not implemented.
+- Cursor CLI does not expose a raw inference-only mode. The bridge fails closed
+  on observed native-tool events, but cannot prove that Cursor performed no
+  internal action before emitting an event.
 - Prompt-token usage is estimated from the Hermes request. Cursor output usage is retained where it maps safely to OpenAI fields.
 - The package does not install a background service. Supervise `serve` using your platform's normal user-service mechanism if needed.
 - Browser clients are unsupported; no CORS policy is enabled.

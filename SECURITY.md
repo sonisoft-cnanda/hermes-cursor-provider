@@ -14,11 +14,16 @@ implemented and tested.
 
 - Anyone with `CURSOR_BRIDGE_API_KEY` can send prompts to the bridge and consume the configured Cursor account.
 - The listener is fixed to `127.0.0.1`; the CLI has no LAN-bind override.
+- Default `hermes` mode uses a fresh empty workspace, dedicated Cursor home,
+  Ask mode and Cursor's sandbox. It rejects explicit workspaces and observed
+  Cursor-native tool events.
 - `--mode agent --workspace PATH` gives Cursor's internal tools direct access to that workspace. Hermes approvals do not intercept those internal operations.
 - Cursor requires `--trust` for non-interactive use. The bridge acknowledges the
   bridge-created or operator-selected workspace in all modes, but only explicit
   `agent` mode receives `--force`.
 - Cursor authentication is managed by `cursor-agent login` or `CURSOR_API_KEY`; the plugin does not store Cursor session files.
+- Login should run with `HOME=$HERMES_HOME/cursor-home`; normal user Cursor
+  rules and MCP configuration are outside the provider trust boundary.
 - The generated bridge token is stored in the selected Hermes `.env` with mode `0600`.
 - Install and uninstall reject symlinks in every package-managed provider-path
   component, including when `--force` is selected.
@@ -41,7 +46,22 @@ implemented and tested.
 - HTTP authentication and bounded request admission happen before POST bodies
   are read. Per-connection timeouts and a fixed handler-thread cap bound slow
   local clients; saturation receives HTTP 429.
+- Every supported HTTP method enters authentication. Transfer-Encoding and
+  duplicate Content-Length framing are rejected before application dispatch.
 - Tests use generated or inert credentials only.
+
+## Cursor CLI containment limit
+
+Cursor CLI print mode exposes an agent runtime even in read-only Ask mode. It
+does not provide a public raw-inference switch. In `hermes` mode the bridge
+instructs Cursor not to use native tools, enables its sandbox, supplies an empty
+workspace, removes workspace/global rules and MCP through a dedicated home, and
+terminates the request when a native-tool event is observed.
+
+These controls preserve Hermes authority at the provider boundary. They cannot
+guarantee that Cursor performed no internal read-only action before reporting a
+tool event. Operators requiring a cryptographically strict model-only boundary
+must use a provider that exposes a raw inference API.
 
 ## Reporting
 

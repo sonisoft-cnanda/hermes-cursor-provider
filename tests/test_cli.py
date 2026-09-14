@@ -6,9 +6,9 @@ from hermes_cursor_provider import cli
 from hermes_cursor_provider.cli import build_parser, main
 
 
-def test_serve_defaults_to_read_only_ask_mode() -> None:
+def test_serve_defaults_to_hermes_mode() -> None:
     args = build_parser().parse_args(["serve"])
-    assert args.mode == "ask"
+    assert args.mode == "hermes"
 
 
 def test_agent_mode_warns_that_hermes_approvals_do_not_apply(

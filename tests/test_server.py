@@ -7,6 +7,12 @@ import time
 
 import pytest
 
+from hermes_cursor_provider.protocol import CursorProtocolError
+from hermes_cursor_provider.runner import (
+    CursorAuthenticationError,
+    CursorModelUnavailableError,
+    CursorTimeoutError,
+)
 from hermes_cursor_provider.server import (
     BridgeApplication,
     BridgeResponse,
@@ -19,6 +25,20 @@ TEST_TOKEN = "bridge-test-token-" + "x" * 32
 
 
 class StubRunner:
+    class Config:
+        mode = "hermes"
+
+    config = Config()
+
+    def diagnostics(self) -> dict[str, object]:
+        return {
+            "installed": True,
+            "authenticated": True,
+            "version": "test",
+            "models_available": True,
+            "model_count": 2,
+        }
+
     def list_models(self) -> list[str]:
         return ["auto", "composer-2.5"]
 
@@ -66,7 +86,11 @@ def test_health_and_models_are_openai_shaped() -> None:
     models = app.handle("GET", "/v1/models", _auth(), b"")
 
     assert health.status == 200
-    assert json.loads(health.body) == {"status": "ok"}
+    health_payload = json.loads(health.body)
+    assert health_payload["status"] == "ok"
+    assert health_payload["mode"] == "hermes"
+    assert health_payload["cursor"]["version"] == "test"
+    assert health_payload["capabilities"]["streaming"] is False
     assert json.loads(models.body) == {
         "object": "list",
         "data": [
@@ -154,6 +178,35 @@ def test_cursor_failure_does_not_expose_exception_secrets(
     assert json.loads(response.body)["error"]["type"] == "cursor_error"
 
 
+@pytest.mark.parametrize(
+    ("failure", "status", "error_type"),
+    [
+        (CursorModelUnavailableError("missing"), 404, "model_not_found"),
+        (CursorAuthenticationError("login"), 503, "provider_unavailable"),
+        (CursorTimeoutError("slow"), 504, "timeout_error"),
+        (CursorProtocolError("bad event"), 502, "cursor_protocol_error"),
+    ],
+)
+def test_typed_cursor_failures_map_to_safe_openai_errors(
+    failure: Exception,
+    status: int,
+    error_type: str,
+) -> None:
+    class FailureRunner(StubRunner):
+        def complete(self, **_: object) -> dict[str, object]:
+            raise failure
+
+    app = BridgeApplication(runner=FailureRunner(), token=TEST_TOKEN)
+    body = json.dumps(
+        {"model": "auto", "messages": [{"role": "user", "content": "hi"}]}
+    ).encode()
+
+    response = app.handle("POST", "/v1/chat/completions", _auth(), body)
+
+    assert response.status == status
+    assert json.loads(response.body)["error"]["type"] == error_type
+
+
 def test_oversized_request_is_rejected_before_json_parse() -> None:
     app = BridgeApplication(runner=StubRunner(), token=TEST_TOKEN, max_body_bytes=8)
     response = app.handle("POST", "/v1/chat/completions", _auth(), b"{" + b"x" * 20)
@@ -223,6 +276,75 @@ def test_http_rejects_unauthorized_request_before_reading_body() -> None:
         response = client.recv(4096)
         client.close()
         assert b" 401 " in response
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.parametrize("method", ["HEAD", "OPTIONS", "PUT", "PATCH", "DELETE"])
+def test_all_http_methods_require_authentication(method: str) -> None:
+    app = BridgeApplication(runner=StubRunner(), token=TEST_TOKEN)
+    server = create_http_server(host="127.0.0.1", port=0, app=app, client_timeout=1.0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address[:2]
+        client = socket.create_connection((str(host), int(port)), timeout=2)
+        client.sendall(
+            f"{method} /unknown HTTP/1.0\r\nContent-Length: 999\r\n\r\n".encode()
+        )
+        response = client.recv(4096)
+        client.close()
+        assert b" 401 " in response
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_http_rejects_transfer_encoding_before_dispatch() -> None:
+    app = BridgeApplication(runner=StubRunner(), token=TEST_TOKEN)
+    server = create_http_server(host="127.0.0.1", port=0, app=app, client_timeout=1.0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address[:2]
+        client = socket.create_connection((str(host), int(port)), timeout=2)
+        client.sendall(
+            b"POST /v1/chat/completions HTTP/1.1\r\n"
+            + f"Authorization: Bearer {TEST_TOKEN}\r\n".encode()
+            + b"Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n"
+        )
+        response_parts = []
+        while chunk := client.recv(4096):
+            response_parts.append(chunk)
+        client.close()
+        response = b"".join(response_parts)
+        assert b" 400 " in response
+        assert b"Transfer-Encoding" in response
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_http_rejects_duplicate_content_length() -> None:
+    app = BridgeApplication(runner=StubRunner(), token=TEST_TOKEN)
+    server = create_http_server(host="127.0.0.1", port=0, app=app, client_timeout=1.0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address[:2]
+        client = socket.create_connection((str(host), int(port)), timeout=2)
+        client.sendall(
+            b"POST /v1/chat/completions HTTP/1.0\r\n"
+            + f"Authorization: Bearer {TEST_TOKEN}\r\n".encode()
+            + b"Content-Length: 2\r\nContent-Length: 3\r\n\r\n{}"
+        )
+        response = client.recv(4096)
+        client.close()
+        assert b" 400 " in response
     finally:
         server.shutdown()
         server.server_close()

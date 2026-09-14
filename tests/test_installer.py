@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import hermes_cursor_provider.installer as installer_module
 from hermes_cursor_provider.installer import (
     PLUGIN_INIT,
     PLUGIN_MANIFEST,
@@ -140,6 +141,51 @@ def test_install_rejects_symlinked_managed_provider_path(
 
     assert sentinel.read_text() == "outside\n"
     assert not (home / ".env").exists()
+
+
+@pytest.mark.parametrize("leaf", [".env", "__init__.py", "plugin.yaml", "__pycache__"])
+def test_install_rejects_symlinked_managed_leaf(
+    tmp_path: Path,
+    leaf: str,
+) -> None:
+    home = tmp_path / "hermes"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = outside / "target"
+    target.write_text("sentinel\n")
+    if leaf == ".env":
+        home.mkdir()
+        (home / leaf).symlink_to(target)
+    else:
+        plugin_dir = home / "plugins" / "model-providers" / "cursor"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / leaf).symlink_to(target, target_is_directory=leaf == "__pycache__")
+
+    with pytest.raises(ValueError, match="symlink"):
+        install_plugin(home, token=TEST_TOKEN, force=True)
+
+    assert target.read_text() == "sentinel\n"
+
+
+def test_install_rolls_back_new_env_when_plugin_write_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "hermes"
+    real_atomic_write = installer_module._atomic_write
+
+    def fail_plugin_write(path: Path, content: str, *, mode: int | None = None) -> None:
+        if path.name == "__init__.py":
+            raise OSError("injected plugin write failure")
+        real_atomic_write(path, content, mode=mode)
+
+    monkeypatch.setattr(installer_module, "_atomic_write", fail_plugin_write)
+
+    with pytest.raises(OSError, match="injected"):
+        install_plugin(home, token=TEST_TOKEN)
+
+    assert not (home / ".env").exists()
+    assert not (home / "plugins" / "model-providers" / "cursor").exists()
 
 
 def test_uninstall_rejects_symlinked_provider_directory_even_with_force(tmp_path: Path) -> None:
