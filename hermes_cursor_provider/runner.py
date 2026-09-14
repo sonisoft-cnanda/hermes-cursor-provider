@@ -527,7 +527,7 @@ class CursorRunner:
         version = self.cursor_version()
         self._preflight_auth()
         models = self.list_models()
-        sandbox_available = None
+        sandbox_command_available = None
         if self.config.mode == "hermes":
             _, stderr, returncode = self._run_control_command(
                 ["sandbox", "run", "/bin/true"],
@@ -538,7 +538,7 @@ class CursorRunner:
                 raise CursorSandboxUnavailableError(
                     f"Cursor sandbox is unavailable: {detail}".rstrip()
                 )
-            sandbox_available = True
+            sandbox_command_available = True
         return {
             "installed": True,
             "authenticated": True,
@@ -547,7 +547,7 @@ class CursorRunner:
             "models_available": bool(models),
             "model_count": len(models),
             "mode": self.config.mode,
-            "sandbox_available": sandbox_available,
+            "sandbox_command_available": sandbox_command_available,
             "workspace_policy": (
                 "fresh-temporary-per-request"
                 if self.config.mode == "hermes"

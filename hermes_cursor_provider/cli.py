@@ -89,6 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--hermes-home", default=_default_hermes_home())
     doctor.add_argument("--cursor-command", default="cursor-agent")
     doctor.add_argument("--cursor-home")
+    doctor.add_argument("--probe-model")
 
     return parser
 
@@ -180,6 +181,7 @@ def _doctor(args: argparse.Namespace) -> int:
     print(f"cursor-agent: {cursor_path or 'missing'}")
     cursor_ok = False
     if cursor_path:
+        runner = None
         try:
             runner = CursorRunner(
                 RunnerConfig(
@@ -191,10 +193,28 @@ def _doctor(args: argparse.Namespace) -> int:
             print(f"cursor version: {diagnostics['version']}")
             print("cursor authentication: ok")
             print(f"cursor models: {diagnostics['model_count']}")
-            runner.close()
+            if args.probe_model:
+                completion = runner.complete(
+                    model=args.probe_model,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": "Reply exactly CURSOR_PROVIDER_DOCTOR_OK. Do not use tools.",
+                        }
+                    ],
+                    tools=None,
+                    tool_choice=None,
+                )
+                content = completion["choices"][0]["message"]["content"]
+                if content != "CURSOR_PROVIDER_DOCTOR_OK":
+                    raise RuntimeError("Cursor inference probe returned unexpected content")
+                print(f"cursor inference ({args.probe_model}): ok")
             cursor_ok = True
         except (OSError, RuntimeError, ValueError) as exc:
             print(f"cursor readiness: failed ({type(exc).__name__})")
+        finally:
+            if runner is not None:
+                runner.close()
     return 0 if plugin_ok and token_ok and token_mode_ok and cursor_ok else 1
 
 

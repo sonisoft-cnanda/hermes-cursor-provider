@@ -88,7 +88,12 @@ From a checkout:
 uv tool install .
 hermes-cursor-provider install
 hermes-cursor-provider doctor
+hermes-cursor-provider doctor --probe-model cursor-grok-4.6-high
 ```
+
+The optional probe performs a real completion through the same sandboxed path
+used by `hermes` mode. It can consume Cursor usage; without it, doctor checks
+the binary, authentication, model catalog, and standalone sandbox command only.
 
 `install` performs two scoped operations:
 
