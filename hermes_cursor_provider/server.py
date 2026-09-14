@@ -21,6 +21,7 @@ from .runner import (
     CursorCancelledError,
     CursorModelUnavailableError,
     CursorOutputLimitError,
+    CursorSandboxUnavailableError,
     CursorTimeoutError,
     CursorUnavailableError,
 )
@@ -259,6 +260,12 @@ class BridgeApplication:
             return _error("Requested Cursor model is unavailable", status=404, error_type="model_not_found")
         except CursorAuthenticationError:
             return _error("Cursor is not authenticated", status=503, error_type="provider_unavailable")
+        except CursorSandboxUnavailableError:
+            return _error(
+                "Cursor sandbox is unavailable in hermes mode",
+                status=503,
+                error_type="provider_unavailable",
+            )
         except CursorTimeoutError:
             return _error("Cursor completion timed out", status=504, error_type="timeout_error")
         except CursorOutputLimitError:

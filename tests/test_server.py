@@ -11,6 +11,7 @@ from hermes_cursor_provider.protocol import CursorProtocolError
 from hermes_cursor_provider.runner import (
     CursorAuthenticationError,
     CursorModelUnavailableError,
+    CursorSandboxUnavailableError,
     CursorTimeoutError,
 )
 from hermes_cursor_provider.server import (
@@ -183,6 +184,7 @@ def test_cursor_failure_does_not_expose_exception_secrets(
     [
         (CursorModelUnavailableError("missing"), 404, "model_not_found"),
         (CursorAuthenticationError("login"), 503, "provider_unavailable"),
+        (CursorSandboxUnavailableError("sandbox"), 503, "provider_unavailable"),
         (CursorTimeoutError("slow"), 504, "timeout_error"),
         (CursorProtocolError("bad event"), 502, "cursor_protocol_error"),
     ],

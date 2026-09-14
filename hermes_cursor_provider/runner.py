@@ -98,6 +98,10 @@ class CursorModelUnavailableError(CursorRunnerError):
     pass
 
 
+class CursorSandboxUnavailableError(CursorRunnerError):
+    pass
+
+
 class CursorTimeoutError(CursorRunnerError):
     pass
 
@@ -523,6 +527,18 @@ class CursorRunner:
         version = self.cursor_version()
         self._preflight_auth()
         models = self.list_models()
+        sandbox_available = None
+        if self.config.mode == "hermes":
+            _, stderr, returncode = self._run_control_command(
+                ["sandbox", "run", "/bin/true"],
+                timeout_seconds=min(self.config.timeout_seconds, 15.0),
+            )
+            if returncode != 0:
+                detail = _redact(stderr, (self.config.cursor_api_key,))
+                raise CursorSandboxUnavailableError(
+                    f"Cursor sandbox is unavailable: {detail}".rstrip()
+                )
+            sandbox_available = True
         return {
             "installed": True,
             "authenticated": True,
@@ -531,6 +547,7 @@ class CursorRunner:
             "models_available": bool(models),
             "model_count": len(models),
             "mode": self.config.mode,
+            "sandbox_available": sandbox_available,
             "workspace_policy": (
                 "fresh-temporary-per-request"
                 if self.config.mode == "hermes"
@@ -607,6 +624,10 @@ class CursorRunner:
 
         if returncode != 0 and not accumulator.is_error:
             detail = _redact(stderr or "\n".join(malformed_lines), (self.config.cursor_api_key,))
+            if self.config.mode == "hermes" and "sandbox" in detail.lower():
+                raise CursorSandboxUnavailableError(
+                    "Cursor sandbox is unavailable in hermes mode"
+                )
             raise CursorUnavailableError(
                 f"Cursor CLI exited with status {returncode}: {detail}".rstrip()
             )
